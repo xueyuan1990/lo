@@ -23,9 +23,9 @@ import scala.collection.mutable.ArrayBuffer
 import scala.collection.{Map, mutable}
 
 /**
-  * Created by xueyuan on 2017/7/21.增加任意特征
+  * Created by xueyuan on 2017/7/21.增加任意特征，不进行onehot编码，而是输出每个特征的取值个数
   */
-object generate_feature_onehot {
+object generate_feature_cate {
   var sc: SparkContext = null
   var hiveContext: HiveContext = null
   var sqlContext: SQLContext = null
@@ -52,36 +52,53 @@ object generate_feature_onehot {
     Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
     //feature列名，文件中每行一个列名
     var test = false
-    var feature_col_file = "/tmp/xueyuan/online/lookalike/feature_col.txt"
+    var feature_col_file_single = "/tmp/xueyuan/online/lookalike/feature_col_single.txt"
+    var feature_col_file_multi = "/tmp/xueyuan/online/lookalike/feature_multi_col.txt"
     var table_out = ""
-    if (args.length == 3) {
+    if (args.length == 4) {
       test = args(0).toBoolean
       println("***********************test=" + test + "*****************************")
-      feature_col_file = args(1)
-      println("***********************feature_col_file=" + feature_col_file + "*****************************")
-      table_out = args(2)
+      if (test == false) {
+        feature_col_file_single = args(1)
+        println("***********************feature_col_file=" + feature_col_file_single + "*****************************")
+        feature_col_file_multi = args(2)
+        println("***********************feature_col_file_multi=" + feature_col_file_multi + "*****************************")
+      }
+      table_out = args(3)
       println("***********************table_out=" + table_out + "*****************************")
     }
 
-    var feature: Array[String] = null
+    var feature_single = Array.empty[String]
+    var feature_multi = Array.empty[String]
+    var feature = Array.empty[String]
     var df: DataFrame = null
     if (test) {
-      feature = Array("sex", "marriage_status")
+      feature_single = Array("sex", "marriage_status")
+      feature_multi = Array("intr1", "intr2")
+      feature = feature_single ++ feature_multi
       df = {
         sqlContext.createDataFrame(Seq(
-          (0, 3, "male,other", 5),
-          (1, 7, "female", 6),
-          (2, 7, "female", 5),
-          (3, 7, "female", 6)
-        )).toDF("imei", "uxip_boot_users_cycle", "sex", "marriage_status")
+          (0, 3, "male", 5, ",1,2,3,", ",a,d,", 2),
+          (1, 7, "female", 8, ",3,", ",b,", 1),
+          (2, 7, "other", 7, ",2,3,", ",a,b,", 6),
+          (3, 7, "female", 6, ",2,", ",c,", 9)
+        )).toDF("imei", "uxip_boot_users_cycle", "sex", "marriage_status", "intr1", "intr2", "app_cur_com_meizu_media_reader")
       }
     } else {
-      feature = load_feature(feature_col_file)
+      feature_single = load_feature(feature_col_file_single)
+      feature_multi = load_feature(feature_col_file_multi)
+      feature = feature_single ++ feature_multi
       df = load_data(feature)
     }
-    //将所有feature转为index
-    for (col <- feature) {
-      df = oneColProcess(col)(df)
+    //将single feature转为index
+    for (col <- feature_single) {
+      df = oneColProcessSingle(col)(df)
+    }
+    //将multi feature转为one hot
+    for (col <- feature_multi) {
+      df = oneColProcessMulti(col)(df)
+      val catSize = oriFeatureMap(col)
+      df = oneColProcessWithOneHot(col, catSize)(df)
     }
     if (test) {
       println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************feature index*****************************")
@@ -97,64 +114,62 @@ object generate_feature_onehot {
       sum = sum + v
     }
     println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************oriFeatureMap sum=" + sum + "*****************************")
-    //转换为onehot编码
-    for (col <- feature) {
-      val catSize = oriFeatureMap(col)
-      df = oneColProcessWithOneHot(col, catSize)(df)
-    }
-    if (test) {
-      println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************feature onhot*****************************")
-      for (row <- df.take(10)) {
-        println(row.toString())
-      }
-    }
-
-
+    val oriFeatureMap_br = sc.broadcast(oriFeatureMap)
     val res = df.map(r => {
       val imei = r.getAs("imei").toString.toLong
       val uxip_boot_users_cycle = r.getAs("uxip_boot_users_cycle").toString
-      val feature_value_map = r.getValuesMap[String](feature)
-      var new_feature = new ArrayBuffer[String]()
-      for (f <- feature) {
-        val v = feature_value_map(f)
+      val app_cur_com_meizu_media_reader = r.getAs("app_cur_com_meizu_media_reader").toString
+      val single_feature_value_map = r.getValuesMap[String](feature_single)
+      val multi_feature_value_map = r.getValuesMap[String](feature_multi)
+      var new_multi_feature_temp = new ArrayBuffer[String]()
+      for (f <- feature_multi) {
+        val v = multi_feature_value_map(f)
         if (v != null && v.length > 0) {
-          new_feature += v
+          new_multi_feature_temp += v
         }
       }
-      val feature_array = new_feature.mkString(",").split(",").map(f => f.toDouble)
-      val size = feature_array.size
-      val index_array = new ArrayBuffer[Int]()
-      for (i <- 0 until feature_array.length) {
-        if (feature_array(i) == 1.0) {
-          index_array += i
+      var new_multi_feature = new ArrayBuffer[String]()
+      for (f <- new_multi_feature_temp.mkString(",").split(",")) {
+        if(f!=null&&f.length>0){
+          new_multi_feature += "2:" + f
         }
       }
-      (imei, size, index_array.mkString(","), uxip_boot_users_cycle)
+      var new_single_feature = new ArrayBuffer[String]()
+      val oriFeatureMap = oriFeatureMap_br.value
+      for (f <- feature_single) {
+        val v = single_feature_value_map(f)
+        if (v != null && v.length > 0) {
+          new_single_feature += oriFeatureMap(f) + ":" + v
+        }
+      }
+      val new_feature = new_multi_feature ++ new_single_feature
+      val feature_array = new_feature.mkString(",")
+      (imei, feature_array, uxip_boot_users_cycle, app_cur_com_meizu_media_reader)
     })
     if (test) {
       println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************rdd*****************************")
-      for ((imei, size, cyc, fea) <- res.take(10)) {
-        println(imei + " " + size + " " + cyc + " " + fea)
+      for ((imei, feature_array, cyc, reader) <- res.take(10)) {
+        println(imei + " " + feature_array + " " + cyc + " " + reader)
       }
     }
     save_feature(table_out, res)
 
   }
 
-  def save_feature(table_out: String, data: RDD[(Long, Int, String, String)]): Unit = {
+  def save_feature(table_out: String, data: RDD[(Long, String, String, String)]): Unit = {
     println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************save table start*****************************")
     val candidate_rdd = data.map(r => Row(r._1, r._2, r._3, r._4))
 
     val structType = StructType(
       StructField("imei", LongType, false) ::
-        StructField("feature_size", IntegerType, false) ::
         StructField("feature", StringType, false) ::
         StructField("uxip_boot_users_cycle", StringType, false) ::
+        StructField("app_cur_com_meizu_media_reader", StringType, false) ::
         Nil
     )
     //from RDD to DataFrame
     val candidate_df = hiveContext.createDataFrame(candidate_rdd, structType)
-    val create_table_sql: String = "create table if not exists " + table_out + " ( imei bigint,feature_size int, feature string,uxip_boot_users_cycle string ) partitioned by (stat_date bigint) stored as textfile"
+    val create_table_sql: String = "create table if not exists " + table_out + " ( imei bigint,feature string,uxip_boot_users_cycle string,app_cur_com_meizu_media_reader string ) partitioned by (stat_date bigint) stored as textfile"
     val c1 = Calendar.getInstance()
     //        c1.add(Calendar.DATE, -1)
     val sdf1 = new SimpleDateFormat("yyyyMMdd")
@@ -189,7 +204,7 @@ object generate_feature_onehot {
   def load_data(feature: Array[String]) = {
     val feature_string = feature.mkString(",")
     val feature_num = feature.length
-    val sql_1 = "select imei,uxip_boot_users_cycle," + feature_string + " from user_profile.idl_fdt_dw_tag"
+    val sql_1 = "select imei,uxip_boot_users_cycle," + feature_string + ",app_cur_com_meizu_media_reader from user_profile.idl_fdt_dw_tag"
     val df = hiveContext.sql(sql_1).cache()
     println("***********************load_data finished" + df.count() + "*****************************")
     df
@@ -207,20 +222,57 @@ object generate_feature_onehot {
         }
         val value_arr = Array.fill(index_arr.length)(1.0)
         val vec = Vectors.sparse(catSize, index_arr.toArray, value_arr)
-        val arr = vec.toArray
+        val arr = vec.toArray.map(r=>r.toInt)
         arr.mkString(",")
       } else {
-        Array.fill(catSize)(0.0).mkString(",")
+        Array.fill(catSize)(0).mkString(",")
       }
     }
     df.withColumn(col, stringToVector(df(col)))
   }
 
-  def oneColProcess(col: String) = (df: DataFrame) => {
+  def oneColProcessSingle(col: String) = (df: DataFrame) => {
     val sma = df.schema
     sma(col).dataType match {
       case StringType => {
-        //        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
+        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
+        oriFeatureMap(col) = catMap.size
+        val stringToDouble = udf[String, String] {
+          catMap(_).toString
+        }
+        df.withColumn(col, stringToDouble(df(col)))
+      }
+      case LongType => {
+        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
+        oriFeatureMap(col) = catMap.size
+        val stringToDouble = udf[String, Long] {
+          catMap(_).toString
+        }
+        df.withColumn(col, stringToDouble(df(col)))
+      }
+      case DoubleType => {
+        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
+        oriFeatureMap(col) = catMap.size
+        val stringToDouble = udf[String, Double] {
+          catMap(_).toString
+        }
+        df.withColumn(col, stringToDouble(df(col)))
+      }
+      case IntegerType => {
+        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
+        oriFeatureMap(col) = catMap.size
+        val stringToDouble = udf[String, Int] {
+          catMap(_).toString
+        }
+        df.withColumn(col, stringToDouble(df(col)))
+      }
+    }
+  }
+
+  def oneColProcessMulti(col: String) = (df: DataFrame) => {
+    val sma = df.schema
+    sma(col).dataType match {
+      case StringType => {
         val catMap2 = df.select(col).flatMap(_.getString(0).split(",")).distinct.filter(!"".equals(_)).collect.zipWithIndex.toMap
         oriFeatureMap(col) = catMap2.size
         val stringToDouble = udf[String, String] { w =>
@@ -230,32 +282,7 @@ object generate_feature_onehot {
             val r = catMap2(ele)
             res += r
           }
-          res.toArray.mkString(",")
-          //          catMap(_)
-        }
-        df.withColumn(col, stringToDouble(df(col)))
-      }
-      case LongType => {
-        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
-        oriFeatureMap(col) = catMap.size
-        val stringToDouble = udf[String, Long] { w =>
-          Array(catMap(w)).mkString(",")
-        }
-        df.withColumn(col, stringToDouble(df(col)))
-      }
-      case DoubleType => {
-        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
-        oriFeatureMap(col) = catMap.size
-        val stringToDouble = udf[String, Double] { w =>
-          Array(catMap(w)).mkString(",")
-        }
-        df.withColumn(col, stringToDouble(df(col)))
-      }
-      case IntegerType => {
-        val catMap = df.select(col).distinct.map(_.get(0)).collect.zipWithIndex.toMap
-        oriFeatureMap(col) = catMap.size
-        val stringToDouble = udf[String, Int] { w =>
-          Array(catMap(w)).mkString(",")
+          res.sortWith(_ < _).toArray.mkString(",")
         }
         df.withColumn(col, stringToDouble(df(col)))
       }

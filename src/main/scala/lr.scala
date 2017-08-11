@@ -1,4 +1,4 @@
-package com.lookalike
+package com.test
 
 import java.io.{BufferedReader, InputStreamReader}
 import java.text.SimpleDateFormat
@@ -7,7 +7,7 @@ import java.util.{Calendar, Date}
 
 import org.apache.hadoop.fs.Path
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.mllib.classification.LogisticRegressionWithLBFGS
+import org.apache.spark.mllib.classification.{LogisticRegressionModel, LogisticRegressionWithLBFGS}
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.mllib.linalg.{DenseVector, SparseVector}
 import org.apache.spark.mllib.regression.LabeledPoint
@@ -26,15 +26,15 @@ import scala.collection.mutable.ArrayBuffer
 import scala.collection.{Map, mutable}
 
 /**
-  * Created by xueyuan on 2017/6/15.根据onehot编码，输入到gbdt进行计算，所有值作为离散值处理
+  * Created by xueyuan on 2017/6/15.根据onehot编码，输入到lr进行计算
   */
-object gbdt {
+object lr {
   var sc: SparkContext = null
   var hiveContext: HiveContext = null
   //  val seed_file = "/tmp/xueyuan/seed1.txt"
   val sdf_date: SimpleDateFormat = new SimpleDateFormat("yyyyMMdd")
   val sdf_time: SimpleDateFormat = new SimpleDateFormat("HH:mm:ss")
-  val partition_num = 400
+  val partition_num = 1000
   val test = true
   //tree
   var numIterations = 50
@@ -46,16 +46,11 @@ object gbdt {
   var feature_size = 0
 
   def main(args: Array[String]): Unit = {
-    var userName = System.getenv("HADOOP_USER_NAME")
-    if (userName == null || userName == "") {
-      userName = "mzsip"
-    }
-
+    val userName = "mzsip"
     System.setProperty("user.name", userName)
     System.setProperty("HADOOP_USER_NAME", userName)
     println("***********************start*****************************")
-    println(" user name = " + userName)
-    val sparkConf: SparkConf = new SparkConf().setAppName("lookalike_gbdt")
+    val sparkConf: SparkConf = new SparkConf().setAppName("xueyuan_lookalike")
     sc = new SparkContext(sparkConf)
     val sqlContext = new SQLContext(sc)
     println("***********************sc*****************************")
@@ -133,7 +128,7 @@ object gbdt {
       new LabeledPoint(0.0, r._2)
     })
     //training
-    val model = training_reg(point_seed, point_samp)
+    val model = training_lr(point_seed, point_samp)
     seeduser_feature.unpersist()
     println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************model finished *****************************")
     //predict
@@ -160,7 +155,7 @@ object gbdt {
     val hdfs = org.apache.hadoop.fs.FileSystem.get(new org.apache.hadoop.conf.Configuration())
     val outputstream = hdfs.create(new Path(outputFile), true)
     for ((imei, score) <- result) {
-      outputstream.writeBytes(imei + "\001" + score + "\n")
+      outputstream.writeBytes(imei + "," + score + "\n")
     }
     outputstream.close()
     if (test) {
@@ -265,7 +260,7 @@ object gbdt {
     val data = point_seed ++ point_samp
     data.repartition(partition_num)
     val lr = new LogisticRegressionWithLBFGS().setIntercept(true) //.setNumClasses(2)
-    lr.optimizer.setRegParam(0.6).setConvergenceTol(0.000001).setNumIterations(5000)
+    lr.optimizer.setRegParam(0.6).setNumIterations(5000)//setConvergenceTol(0.000001).
       .setUpdater(new SquaredL2Updater)
     println(sdf_time.format(new Date((System.currentTimeMillis()))) + "***********************training start*****************************")
     val model = lr.run(data)
@@ -319,7 +314,7 @@ object gbdt {
 
   }
 
-  def pre(model: GradientBoostedTreesModel, user_feature_forpre: RDD[(Long, SparseVector)], targetSize: Int): Array[(Long, Double)] = {
+  def pre(model: LogisticRegressionModel, user_feature_forpre: RDD[(Long, SparseVector)], targetSize: Int): Array[(Long, Double)] = {
     val user_pre = user_feature_forpre.repartition(partition_num).mapPartitions(iter => for (r <- iter) yield {
       val prediction = model.predict(r._2)
       (r._1, prediction)
